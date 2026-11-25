@@ -88,20 +88,3 @@ class VideoMan():
         cv2.putText(img, text, (text_x, text_y), font, font_scale, color_bgr, text_thickness, cv2.LINE_AA)
         cv2.imwrite(image_path, img)
         print(f"Scale bar applied to: {image_path}")
-
-    def calibrate_shutter_duration(self, path):
-        start_time = time.time()
-        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # print(path)
-        filename = jn(path,f'calibrationTest.png')
-        
-        # Capture full resolution image
-        # Capture full resolution image using still configuration
-        still_config = cap.create_still_configuration(main={"size": cap.sensor_resolution, "format": "RGB888"})
-        cap.switch_mode_and_capture_file(still_config, filename)
-        end_time = time.time()
-        capture_duration = end_time - start_time
-        # cam.capture_file(filename)
-        
-        # Optional: Display a "Photo Taken" message on the preview
-        return capture_duration

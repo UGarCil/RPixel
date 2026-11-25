@@ -25,7 +25,6 @@ class Mult(QMainWindow):
         self.mainUI.actionNew.triggered.connect(self.new_file_dialog)
         self.mainUI.actionOpen.triggered.connect(self.open_existing_project)
         self.mainUI.button_SingleShot.clicked.connect(self.singleShot)
-        self.mainUI.button_timelapse.clicked.connect(self.multistack)
         # Scale bar behaviors
         self.mainUI.button_calibrate_scale.clicked.connect(self.start_calibration)
         self.mainUI.button_load_scalebar.clicked.connect(self.load_scalebar_dialog)
@@ -329,72 +328,6 @@ class Mult(QMainWindow):
                 QtWidgets.QMessageBox.critical(None,"Prefix should not be empty", "An empty prefix would create a subfolder without name. Please provide at least one alpha-numberic character as prefix before continuing..")
         else:
             QtWidgets.QMessageBox.critical(None,"No Project initialized", "A project is required before enabling access to the main images folder and save a single shot.\nPlease create a new project before continuing...")
-
-    def multistack(self):
-        value = self.mainUI.number_frames_spinbox.value()
-        if os_settings["project_folder"] == "":
-            QtWidgets.QMessageBox.critical(None, "No Project initialized", 
-                "A project is required before enabling access to the main images folder and begin timelapse image capture.\nPlease create a new project before continuing...")
-            return
-
-        current_prefix = self.mainUI.prefix_lineEdit.text().strip()
-        if current_prefix == "":
-            QtWidgets.QMessageBox.critical(None, "Prefix should not be empty", 
-                "An empty prefix would create a subfolder without name. Please provide at least one alpha-numberic character as prefix before continuing..")
-            return
-
-        # self.mainUI.buttonStatus.setIcon(self.mainUI.icon4)
-        # Get capture duration in seconds
-        capture_duration = self.videoManager.calibrate_shutter_duration(os_settings["project_folder"])
-        
-        # Get user's desired interval in milliseconds
-        user_interval = int(self.mainUI.waitingTime_spinbox.value() * 1000)
-        
-        # Calculate actual timer interval by subtracting capture duration
-        # Convert capture_duration to milliseconds first
-        capture_duration_ms = int(capture_duration * 1000)
-        actual_interval = max(0, user_interval + capture_duration_ms)
-        
-        prefix_path = jn(os_settings["project_folder"], "images", current_prefix)
-        os_settings["current_prefix"] = current_prefix
-        if not os.path.exists(prefix_path):
-            os.mkdir(prefix_path)
-
-        # Store sequence parameters as instance variables
-        self.frames_remaining = value
-        self.frames_total = value
-        self.capture_path = prefix_path
-
-        # Initialize the progress bar for the sequence
-        self.mainUI.progressBar.setMaximum(value)
-        self.mainUI.progressBar.setValue(0)
-        self.mainUI.progressBar.show()
-        
-        # Create a timer for sequence capture
-        self.sequence_timer = QTimer()
-        self.sequence_timer.timeout.connect(self.capture_sequence_frame)
-        self.sequence_timer.start(actual_interval)  # native interval
-
-        # print(f"Capture duration: {capture_duration:.3f}s")
-        # print(f"User requested interval: {user_interval/1000:.3f}s")
-        # print(f"Actual timer interval: {user_interval/1000:.3f}s")
-
-    def capture_sequence_frame(self):
-        """Captures a single frame in the sequence"""
-        if self.frames_remaining > 0:
-            self.mainUI.buttonStatus.setIcon(self.mainUI.icon4)
-            QApplication.processEvents()  # Method 1: Force update
-            self.capture_photo(self.capture_path)
-            self.frames_remaining -= 1
-            print("image captured")
-            self.mainUI.progressBar.setValue(self.frames_total - self.frames_remaining)
-            self.mainUI.buttonStatus.setIcon(self.mainUI.icon3)
-            QApplication.processEvents()  # Method 1: Force update
-        else:
-            self.sequence_timer.stop()
-            del self.sequence_timer  # Cleanup
-            QtWidgets.QMessageBox.information(None, "Multistack complete",
-                f"Captured {self.frames_total} frames.")
 
     def openFolder(self):
         if os_settings["project_folder"] != "":
