@@ -6,7 +6,9 @@ from os.path import join as jn
 from collections import namedtuple
 
 import random
-import json 
+import json
+import re
+import shutil
 
 import sys
 import cv2
@@ -72,20 +74,24 @@ display_settings = {"image":None, "mask":None}
 
 cursor_settings = {"in_display":False}
 
-os_settings = {"project_folder":"", "current_folder":"", "current_prefix":"", "format":"png"}
+os_settings = {"project_folder":"", "current_folder":"", "format":"png"}
 
 # DD. SCALE_SETTINGS
-# scale_settings = {"calibration":dict|None, "color":(int,int,int)}
-# interp. global scale bar state. "calibration" holds the loaded calibration dict
-# {"name":str, "pixels":float, "distance":float, "unit":str} measured on the 980x740 preview;
-# "color" is the bar color as an RGB tuple
-scale_settings = {"calibration":None, "color":(255, 255, 255)}
+# scale_settings = {"calibration":dict|None}
+# interp. global scale bar state. "calibration" holds the active calibration dict
+# {"name":str, "pixels":float, "distance":float, "unit":str, "calibrated_at":str}
+# resolved from the project's calibration.json, measured on the 980x740 preview.
+# The bar is never drawn by this program; the calibration is written to a
+# metadata sidecar per photo so the multistack step can insert the bar later
+scale_settings = {"calibration":None}
 
-# DD. CALIBRATIONS_DIR
-# calibrations_dir = str
-# interp. folder where scale bar calibrations are stored as <name>.json files
-CALIBRATIONS_DIR = jn(os.path.dirname(os.path.abspath(__file__)), "calibrations")
-os.makedirs(CALIBRATIONS_DIR, exist_ok=True)
+# DD. CALIBRATION_FILENAME
+# calibration_file = str
+# interp. name of the per-project scale bar registry. It lives at the project root
+# and is snapshotted into each photo series folder when the series is created.
+# Shape: {"microscopes": {name: {"magnifications": {mag: {"pixels":float,
+# "distance":float, "unit":str, "calibrated_at":str}}}}}
+CALIBRATION_FILENAME = "calibration.json"
 
 # DD. CAMERA_SETTINGS
 # camera_settings = {"brightness":float, "contrast":float, "saturation":float,
@@ -107,10 +113,6 @@ AWB_MODES = {"auto":0, "tungsten":1, "fluorescent":2, "indoor":3, "daylight":4, 
 # {"preset_name": {"brightness":float, "contrast":float, ...}}
 PRESETS_FILE = jn(os.path.dirname(os.path.abspath(__file__)), "camera_presets.json")
 
-# DD. UNIT_TO_MM
-# interp. conversion factor from each supported scale bar unit to millimeters
-UNIT_TO_MM = {"mm": 1.0, "µm": 0.001, "cm": 10.0}
-
 # DD. NOMENCLATURE_FILE
 # interp. user-editable file listing the allowed 3-letter structure codes and
 # single-letter orthographic views used to validate the structured prefix fields
@@ -119,12 +121,16 @@ DEFAULT_NOMENCLATURE = """# Nomenclature for structured image prefixes.
 # Edit this file while the application is CLOSED, then restart it to apply changes.
 # Lines starting with '#' are comments. Format: key=value1,value2,value3
 
-# 3-letter codes for anatomical structures / body parts
-structures=pro,opi,che,ped,leg,spi,epi
+# 3-character codes for anatomical structures / body parts (letters or digits)
+structures=hab,prs,cep,hed,pal,opi,epi,cym,lg1,lg2,lg3,lg4
 
-# Single-letter orthographic views:
-# d=dorsal, v=ventral, l=lateral, a=anterior, p=posterior/prolateral, r=retrolateral
-views=d,v,l,a,p,r
+# Single-letter orientations:
+# d=dorsal, v=ventral, l=lateral, a=anterior, t=posterior, p=prolateral, r=retrolateral
+views=d,v,l,a,t,p,r
+
+# 2-digit preparation codes applied before imaging (00 = none).
+# What each code means (its steps) is kept by the curator outside the program.
+preparations=00
 """
 
 # DD. PREVIEW_SIZE

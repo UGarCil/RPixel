@@ -4,14 +4,21 @@ from videoUtils import VideoMan
 import subprocess
 import platform
 import time
+
+def normalize_magnification(text):
+    """Return the canonical CyberInv form of a magnification, or None if invalid.
+    Accepts what the user is likely to type: 20, 20X, 6.2, 6d2, 6d2X -> 20X, 6d2X."""
+    match = re.match(r"^(\d+)([.d](\d+))?X?$", text.strip())
+    if match is None:
+        return None
+    whole, _, frac = match.groups()
+    return f"{whole}d{frac}X" if frac else f"{whole}X"
 # DD. MULTISTACKER
 # multistacker = Mult()
 # interp. program's main object
 class Mult(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowState(QtCore.Qt.WindowMaximized)  # Maximize window
-        # self.setFixedSize(self.size())  # Prevent resizing
         self.videoManager = VideoMan()  #!!!
         self.mainUI = Ui_MainWindow()
         self.mainUI.setupUi(self)
@@ -27,34 +34,57 @@ class Mult(QMainWindow):
         self.mainUI.button_SingleShot.clicked.connect(self.singleShot)
         # Scale bar behaviors
         self.mainUI.button_calibrate_scale.clicked.connect(self.start_calibration)
-        self.mainUI.button_load_scalebar.clicked.connect(self.load_scalebar_dialog)
-        self.mainUI.button_scalebar_color.clicked.connect(self.pick_scalebar_color)
+        self.mainUI.button_import_scalebars.clicked.connect(self.import_scalebars)
+        self.mainUI.actionImport_scalebars.triggered.connect(self.import_scalebars)
         self.mainUI.label.line_drawn.connect(self.finish_calibration)
-        self.mainUI.checkbox_show_scalebar.toggled.connect(self.on_scalebar_toggled)
-        # Structured prefix fields
-        self.mainUI.prefix_taxon.setValidator(QtGui.QRegularExpressionValidator(
-            QtCore.QRegularExpression("^[A-Za-z]{5}SP\\d{3}$")))
+        self.mainUI.button_scalebar_toggle.toggled.connect(self.on_scalebar_panel_toggled)
+        self.mainUI.calib_microscope.currentTextChanged.connect(self.on_calib_microscope_changed)
+        # Structured prefix fields. They compose the CyberInv lab image name:
+        # <sex><type><structure><orientation><preparation>_<voucher>_<magnification>_<instrument>,
+        # e.g. fphabd00_V0001_20X_Z10
+        self.mainUI.prefix_voucher_prefix.setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression("^[A-Z]{1,4}$")))
+        # NOTE: validators on a combo's lineEdit must be parented (here to the
+        # window): the lineEdit() wrapper is temporary, and an unparented
+        # validator is garbage-collected with it, silently disabling validation
         self.mainUI.prefix_microscope.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
-            QtCore.QRegularExpression("^[a-z0-9]+$")))
+            QtCore.QRegularExpression("^[A-Za-z0-9]+$"), self))
         self.mainUI.prefix_magnification.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
-            QtCore.QRegularExpression("^(\\d+d\\d+|\\d+)x$")))
-        structures, views = self.load_nomenclature()
+            QtCore.QRegularExpression("^(\\d+([.d]\\d+)?X?)$"), self))
+        self.mainUI.calib_microscope.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression("^[A-Za-z0-9]+$"), self))
+        self.mainUI.calib_magnification.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression("^(\\d+([.d]\\d+)?X?)$"), self))
+        structures, views, preparations = self.load_nomenclature()
         self.mainUI.prefix_structure.addItems(structures)
         self.mainUI.prefix_view.addItems(views)
-        # New structures/views typed into the editable dropdowns are validated,
-        # then registered into nomenclature.txt when the entry is finished
+        # 00 (no preparation) is always available and is the default
+        if "00" not in preparations:
+            preparations.insert(0, "00")
+        self.mainUI.prefix_preparation.addItems(preparations)
+        self.mainUI.prefix_preparation.setCurrentText("00")
+        # New structures/orientations/preparations typed into the editable dropdowns
+        # are validated, then registered into nomenclature.txt when the entry is finished
         self.mainUI.prefix_structure.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
-            QtCore.QRegularExpression("^[a-z]{3}$")))
+            QtCore.QRegularExpression("^[a-z0-9]{3}$"), self))
         self.mainUI.prefix_view.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
-            QtCore.QRegularExpression("^[a-z]$")))
+            QtCore.QRegularExpression("^[a-z]$"), self))
+        self.mainUI.prefix_preparation.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression("^\\d{2}$"), self))
         self.mainUI.prefix_structure.lineEdit().editingFinished.connect(
             lambda: self.register_nomenclature_entry("structures", self.mainUI.prefix_structure))
         self.mainUI.prefix_view.lineEdit().editingFinished.connect(
             lambda: self.register_nomenclature_entry("views", self.mainUI.prefix_view))
+        self.mainUI.prefix_preparation.lineEdit().editingFinished.connect(
+            lambda: self.register_nomenclature_entry("preparations", self.mainUI.prefix_preparation))
         self.populate_microscope_combos()
-        self.mainUI.prefix_taxon.textChanged.connect(self.compose_prefix)
+        self.mainUI.prefix_voucher_prefix.textChanged.connect(self.compose_prefix)
+        self.mainUI.prefix_voucher_number.valueChanged.connect(self.compose_prefix)
+        self.mainUI.prefix_sex.currentTextChanged.connect(self.compose_prefix)
+        self.mainUI.prefix_type.currentTextChanged.connect(self.compose_prefix)
         self.mainUI.prefix_structure.currentTextChanged.connect(self.compose_prefix)
         self.mainUI.prefix_view.currentTextChanged.connect(self.compose_prefix)
+        self.mainUI.prefix_preparation.currentTextChanged.connect(self.compose_prefix)
         self.mainUI.prefix_microscope.currentTextChanged.connect(self.on_microscope_changed)
         self.mainUI.prefix_magnification.currentTextChanged.connect(self.compose_prefix)
         # Camera settings
@@ -83,75 +113,150 @@ class Mult(QMainWindow):
         except Exception as e:
             print(f"Could not apply camera controls: {e}")
 
-    def capture_photo(self, path):
-        """Capture one photo in the selected format and post-process it (flip, scale bar)."""
+    def capture_photo(self, path, base):
+        """Capture one photo in the selected format and post-process it (flip).
+
+        The scale bar is never drawn by this program: the calibration is written
+        into a metadata sidecar so the multistack step can insert the bar later."""
         ext = self.mainUI.format_combo.currentText()
-        filename = self.videoManager.capture_full_res_photo(path, ext)
+        filename = self.videoManager.capture_full_res_photo(path, ext, self.next_repeat_name(path, base))
         if camera_settings["flip_h"] or camera_settings["flip_v"]:
             self.videoManager.apply_flip(filename, camera_settings["flip_h"], camera_settings["flip_v"])
-        self.maybe_apply_scalebar(filename)
+        calibration = self.resolve_prefix_calibration() or scale_settings["calibration"]
+        if calibration is not None:
+            self.write_scalebar_metadata(filename, calibration)
         return filename
 
-    def maybe_apply_scalebar(self, filename):
-        """Draw the scale bar on a captured photo if enabled and a calibration is available.
+    def next_repeat_name(self, folder, base):
+        """Return the name for the next shot of this view: the first image of a
+        view is saved bare; re-shots of the same view (same base name) get a
+        _2, _3, ... suffix, per the image naming protocol (the repeat is only
+        for rotation series of one structure/orientation/magnification)."""
+        stems = {os.path.splitext(file)[0] for file in os.listdir(folder)}
+        if base not in stems:
+            return base
+        repeat = 2
+        while f"{base}_{repeat}" in stems:
+            repeat += 1
+        return f"{base}_{repeat}"
 
-        A saved calibration whose name appears in the current prefix takes precedence
-        over a manually loaded one.
-        """
-        if not self.mainUI.checkbox_show_scalebar.isChecked():
+    def write_scalebar_metadata(self, filename, calibration):
+        """Write a <photo>.json sidecar with everything the multistack step needs
+        to insert the scale bar later: the calibration and the full-resolution
+        pixel ratio."""
+        img = cv2.imread(filename)
+        if img is None:
+            print(f"Could not read {filename} to write scale bar metadata")
             return
-        calibration = self.detect_calibration_from_prefix() or scale_settings["calibration"]
-        if calibration is None:
-            return
-        # Convert the user-entered bar length (in the selected unit) into the
-        # calibration's unit, which is what the pixel ratio is expressed in
-        display_length = self.mainUI.scalebar_length.value()
-        display_unit = self.mainUI.scalebar_unit.currentText()
-        length_in_calib_units = display_length * UNIT_TO_MM[display_unit] / UNIT_TO_MM[calibration["unit"]]
-        self.videoManager.apply_scale_bar(
-            filename, calibration,
-            length_in_calib_units,
-            self.mainUI.scalebar_thickness.value(),
-            scale_settings["color"],
-            self.mainUI.scalebar_position.currentText(),
-            label=f"{display_length:g} {display_unit}")
+        h, w = img.shape[:2]
+        scale_to_fullres = w / PREVIEW_WIDTH
+        metadata = {
+            "image": os.path.basename(filename),
+            "voucher": self.current_voucher(),
+            "microscope": self.mainUI.prefix_microscope.currentText().strip(),
+            "magnification": normalize_magnification(self.mainUI.prefix_magnification.currentText()),
+            "calibration": calibration,
+            "image_width": w,
+            "image_height": h,
+            "px_per_unit_fullres": calibration["pixels"] / calibration["distance"] * scale_to_fullres,
+        }
+        with open(os.path.splitext(filename)[0] + ".json", "w") as f:
+            json.dump(metadata, f, indent=2)
 
-    def detect_calibration_from_prefix(self):
-        """Return the saved calibration whose name is a substring of the current prefix.
-
-        Longest names are checked first so overlapping microscope/magnification
-        names resolve to the most specific calibration."""
-        prefix = self.mainUI.prefix_lineEdit.text().strip()
-        if prefix == "" or not os.path.isdir(CALIBRATIONS_DIR):
+    def calibration_file(self):
+        """Path of the current project's calibration registry, or None if no project is open."""
+        if os_settings["project_folder"] == "":
             return None
-        names = [file[:-5] for file in os.listdir(CALIBRATIONS_DIR) if file.endswith(".json")]
-        for name in sorted(names, key=len, reverse=True):
-            if name in prefix:
-                return self.load_calibration(jn(CALIBRATIONS_DIR, f"{name}.json"))
-        return None
+        return jn(os_settings["project_folder"], CALIBRATION_FILENAME)
 
-    def load_calibration(self, path):
+    def load_registry(self):
+        """Read the project's calibration.json; empty registry if missing or invalid."""
+        path = self.calibration_file()
+        if path is None or not os.path.exists(path):
+            return {"microscopes": {}}
         try:
-            with open(path, "r") as f:
-                calibration = json.load(f)
-            scale_settings["calibration"] = calibration
-            self.mainUI.scalebar_length.setValue(calibration["distance"])
-            if calibration["unit"] in UNIT_TO_MM:
-                self.mainUI.scalebar_unit.setCurrentText(calibration["unit"])
-            self.mainUI.label_scalebar_status.setText(f"Active: {calibration['name']}")
-            return calibration
-        except (OSError, json.JSONDecodeError, KeyError) as e:
-            QtWidgets.QMessageBox.critical(None, "Invalid calibration", f"Could not load the scale bar file:\n{e}")
+            with open(path) as f:
+                registry = json.load(f)
+            registry.setdefault("microscopes", {})
+            return registry
+        except (OSError, json.JSONDecodeError):
+            return {"microscopes": {}}
+
+    def save_registry(self, registry):
+        with open(self.calibration_file(), "w") as f:
+            json.dump(registry, f, indent=2)
+
+    def get_calibration(self, microscope, magnification):
+        """Return the calibration dict for a microscope/magnification pair, with its
+        assembled name, or None if the pair has not been calibrated in this project."""
+        entry = self.load_registry()["microscopes"].get(microscope, {}).get("magnifications", {}).get(magnification)
+        if entry is None:
             return None
+        return {"name": f"{microscope}_{magnification}", **entry}
+
+    def resolve_prefix_calibration(self):
+        """Look up the calibration matching the microscope/magnification in the prefix
+        fields and make it the active one. Returns None if the pair is not calibrated."""
+        microscope = self.mainUI.prefix_microscope.currentText().strip()
+        magnification = normalize_magnification(self.mainUI.prefix_magnification.currentText())
+        if magnification is None:
+            return None
+        calibration = self.get_calibration(microscope, magnification)
+        if calibration is not None:
+            scale_settings["calibration"] = calibration
+            self.mainUI.label_scalebar_status.setText(f"Active: {calibration['name']}")
+        return calibration
 
     def start_calibration(self):
+        if os_settings["project_folder"] == "":
+            QtWidgets.QMessageBox.critical(None, "No Project initialized",
+                "A project is required before calibrating, since calibrations are stored in the project's calibration.json.\nPlease create or open a project before continuing.")
+            return
+        microscope = self.mainUI.calib_microscope.currentText().strip()
+        magnification = normalize_magnification(self.mainUI.calib_magnification.currentText())
+        if not re.match(r"^[A-Za-z0-9]+$", microscope):
+            QtWidgets.QMessageBox.warning(None, "Invalid microscope code",
+                "Enter a microscope code (letters and digits, e.g. Z10 or LeicaMZ7d5) in the calibration panel before calibrating.")
+            return
+        if magnification is None:
+            QtWidgets.QMessageBox.warning(None, "Invalid magnification",
+                "Enter a magnification (e.g. 20, or 6.2 for 6.2X) in the calibration panel before calibrating.")
+            return
+        self.mainUI.calib_magnification.setCurrentText(magnification)
         QtWidgets.QMessageBox.information(None, "Scale calibration",
-            "Place your metric reference in view, then click and drag a line along a known distance on the preview.\nRelease the mouse button when done.")
+            f"Calibrating {microscope} at {magnification}.\nPlace your metric reference in view, then click and drag a line along a known distance on the preview.\nRelease the mouse button when done.")
         self.mainUI.label.calibration_mode = True
         self.mainUI.label.line_start = None
         self.mainUI.label.line_end = None
         if cursor_settings["in_display"]:
             self.mainUI.label.setCursor(Qt.CrossCursor)
+
+    def ask_reference_distance(self, pixels):
+        """One dialog for the reference distance and its unit, side by side.
+        Returns (distance, unit), or None if the user cancels."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Reference distance")
+        layout = QtWidgets.QFormLayout(dialog)
+        layout.addRow(QtWidgets.QLabel(f"The marked line is {pixels:.0f} px long.\nWhat real distance does it represent?"))
+        distance = QtWidgets.QDoubleSpinBox(dialog)
+        distance.setDecimals(4)
+        distance.setRange(0.0001, 100000.0)
+        distance.setValue(0.5)
+        unit = QtWidgets.QComboBox(dialog)
+        unit.addItems(["mm", "µm", "cm"])
+        row = QtWidgets.QWidget(dialog)
+        hbox = QtWidgets.QHBoxLayout(row)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.addWidget(distance)
+        hbox.addWidget(unit)
+        layout.addRow("Distance", row)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+        return distance.value(), unit.currentText()
 
     def finish_calibration(self, line):
         start, end = line
@@ -164,48 +269,85 @@ class Mult(QMainWindow):
         if pixels < 5:
             QtWidgets.QMessageBox.warning(None, "Line too short", "The reference line is too short to be reliable. Please try again with a longer line.")
             return
-        name, ok = QtWidgets.QInputDialog.getText(None, "Scale bar name",
-            "Name this calibration as <microscope>_<magnification>\n(use 'd' for the decimal point, e.g. leicamz7d5_0d63x):")
-        if not ok or name.strip() == "":
+        microscope = self.mainUI.calib_microscope.currentText().strip()
+        magnification = normalize_magnification(self.mainUI.calib_magnification.currentText())
+        answer = self.ask_reference_distance(pixels)
+        if answer is None:
             return
-        distance, ok = QtWidgets.QInputDialog.getDouble(None, "Reference distance",
-            f"The marked line is {pixels:.0f} px long.\nWhat real distance does it represent?",
-            0.5, 0.0001, 100000.0, 4)
-        if not ok:
-            return
-        unit, ok = QtWidgets.QInputDialog.getItem(None, "Unit", "Unit of the distance:", ["mm", "µm", "cm"], 0, False)
-        if not ok:
-            return
-        calibration = {"name": name.strip(), "pixels": pixels, "distance": distance, "unit": unit}
-        with open(jn(CALIBRATIONS_DIR, f"{calibration['name']}.json"), "w") as f:
-            json.dump(calibration, f)
+        distance, unit = answer
+        registry = self.load_registry()
+        magnifications = registry["microscopes"].setdefault(microscope, {}).setdefault("magnifications", {})
+        if magnification in magnifications:
+            overwrite = QtWidgets.QMessageBox.question(None, "Overwrite calibration",
+                f"{microscope} at {magnification} is already calibrated in this project. Overwrite it?")
+            if overwrite != QtWidgets.QMessageBox.Yes:
+                return
+        magnifications[magnification] = {"pixels": pixels, "distance": distance, "unit": unit,
+                                         "calibrated_at": datetime.now().isoformat(timespec="seconds")}
+        self.save_registry(registry)
+        calibration = {"name": f"{microscope}_{magnification}", **magnifications[magnification]}
         scale_settings["calibration"] = calibration
-        self.mainUI.scalebar_length.setValue(distance)
-        self.mainUI.scalebar_unit.setCurrentText(unit)
         self.mainUI.label_scalebar_status.setText(f"Active: {calibration['name']}")
-        self.populate_microscope_combos()  # register microscope/magnification in the dropdowns
+        self.populate_microscope_combos()  # register microscope/magnification in the prefix dropdowns
+        self.populate_calib_combos()
+        # the panel stays expanded: the user often calibrates several
+        # magnifications in a row, and can collapse it themselves
         QtWidgets.QMessageBox.information(None, "Calibration saved",
-            f"Saved '{calibration['name']}' ({pixels:.0f} px = {distance:g} {unit}).\nIt will be applied automatically to any prefix containing '{calibration['name']}'.")
+            f"Saved '{calibration['name']}' ({pixels:.0f} px = {distance:g} {unit}) to the project's calibration.json.\nPhotos with this microscope and magnification can now be captured.")
 
-    def load_scalebar_dialog(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(None, "Load scale bar", CALIBRATIONS_DIR, "Scale bar calibrations (*.json)")
-        if path:
-            self.load_calibration(path)
+    def import_scalebars(self):
+        """Merge microscopes from another project's calibration.json into the current
+        project's registry. Conflicting microscope names can be overwritten or skipped."""
+        if os_settings["project_folder"] == "":
+            QtWidgets.QMessageBox.critical(None, "No Project initialized",
+                "A project is required before importing scalebars.\nPlease create or open a project before continuing.")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(None, "Import scalebars", "", "Scale bar calibration (*.json)")
+        if not path:
+            return
+        if os.path.abspath(path) == os.path.abspath(self.calibration_file()):
+            QtWidgets.QMessageBox.warning(None, "Same file", "That file is already the current project's calibration.")
+            return
+        try:
+            with open(path) as f:
+                imported = json.load(f)["microscopes"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+            QtWidgets.QMessageBox.critical(None, "Invalid calibration", f"Could not read the scale bar file:\n{e}")
+            return
+        if not imported:
+            QtWidgets.QMessageBox.information(None, "Nothing to import", "The selected file contains no microscopes.")
+            return
+        registry = self.load_registry()
+        conflicts = [name for name in imported if name in registry["microscopes"]]
+        overwrite = True
+        if conflicts:
+            answer = QtWidgets.QMessageBox.question(None, "Conflicting microscopes",
+                f"Already calibrated in this project: {', '.join(sorted(conflicts))}.\nOverwrite them with the imported versions?")
+            overwrite = answer == QtWidgets.QMessageBox.Yes
+        count = 0
+        for name, data in imported.items():
+            if name in conflicts and not overwrite:
+                continue
+            registry["microscopes"][name] = data
+            count += 1
+        self.save_registry(registry)
+        self.populate_microscope_combos()
+        self.populate_calib_combos()
+        QtWidgets.QMessageBox.information(None, "Import complete",
+            f"Imported {count} microscope(s) into the project's calibration.json.")
 
-    def pick_scalebar_color(self):
-        color = QColorDialog.getColor()
-        if color.isValid():
-            scale_settings["color"] = (color.red(), color.green(), color.blue())
-            self.mainUI.button_scalebar_color.setStyleSheet(
-                f"background-color:rgb({color.red()},{color.green()},{color.blue()});color:black;")
+    def on_scalebar_panel_toggled(self, checked):
+        self.mainUI.scalebar_panel.setVisible(checked)
+        self.mainUI.button_scalebar_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
 
     def load_nomenclature(self):
-        """Read the allowed structure codes and view letters from nomenclature.txt,
-        recreating it with defaults if it has been deleted."""
+        """Read the allowed structure codes, orientation letters and preparation
+        codes from nomenclature.txt, recreating it with defaults if it has been
+        deleted."""
         if not os.path.exists(NOMENCLATURE_FILE):
             with open(NOMENCLATURE_FILE, "w") as f:
                 f.write(DEFAULT_NOMENCLATURE)
-        structures, views = [], []
+        structures, views, preparations = [], [], []
         with open(NOMENCLATURE_FILE) as f:
             for line in f:
                 line = line.strip()
@@ -217,7 +359,9 @@ class Mult(QMainWindow):
                     structures = items
                 elif key.strip() == "views":
                     views = items
-        return structures, views
+                elif key.strip() == "preparations":
+                    preparations = items
+        return structures, views, preparations
 
     def register_nomenclature_entry(self, key, combo):
         """Register a newly typed structure/view: it must pass the field validator
@@ -248,23 +392,14 @@ class Mult(QMainWindow):
         print(f"Registered new nomenclature entry ({key}): {value}")
 
     def get_registered_microscopes(self):
-        """Build {microscope: [magnification, ...]} from saved calibration files
-        named <microscope>_<magnification>.json."""
+        """Build {microscope: [magnification, ...]} from the project's calibration.json."""
         registry = {}
-        if os.path.isdir(CALIBRATIONS_DIR):
-            for file in os.listdir(CALIBRATIONS_DIR):
-                name = file[:-5] if file.endswith(".json") else ""
-                if "_" in name:
-                    microscope, magnification = name.rsplit("_", 1)
-                    registry.setdefault(microscope, [])
-                    if magnification not in registry[microscope]:
-                        registry[microscope].append(magnification)
-        for magnifications in registry.values():
-            magnifications.sort()
+        for microscope, data in self.load_registry()["microscopes"].items():
+            registry[microscope] = sorted(data.get("magnifications", {}).keys())
         return registry
 
     def populate_microscope_combos(self):
-        """Refresh the microscope dropdown from saved calibrations, keeping the
+        """Refresh the microscope dropdown from the project calibrations, keeping the
         current selection if it is still registered."""
         previous = self.mainUI.prefix_microscope.currentText()
         registry = self.get_registered_microscopes()
@@ -275,6 +410,29 @@ class Mult(QMainWindow):
             self.mainUI.prefix_microscope.setCurrentText(previous)
         self.mainUI.prefix_microscope.blockSignals(False)
         self.on_microscope_changed(self.mainUI.prefix_microscope.currentText())
+
+    def populate_calib_combos(self):
+        """Refresh the calibration panel's microscope dropdown from the project
+        calibrations, keeping the current selection if it is still registered."""
+        previous = self.mainUI.calib_microscope.currentText()
+        registry = self.get_registered_microscopes()
+        self.mainUI.calib_microscope.blockSignals(True)
+        self.mainUI.calib_microscope.clear()
+        self.mainUI.calib_microscope.addItems(sorted(registry.keys()))
+        if previous:
+            self.mainUI.calib_microscope.setCurrentText(previous)
+        self.mainUI.calib_microscope.blockSignals(False)
+        self.on_calib_microscope_changed(self.mainUI.calib_microscope.currentText())
+
+    def on_calib_microscope_changed(self, microscope):
+        registry = self.get_registered_microscopes()
+        previous = self.mainUI.calib_magnification.currentText()
+        self.mainUI.calib_magnification.blockSignals(True)
+        self.mainUI.calib_magnification.clear()
+        self.mainUI.calib_magnification.addItems(registry.get(microscope, []))
+        if previous:
+            self.mainUI.calib_magnification.setCurrentText(previous)
+        self.mainUI.calib_magnification.blockSignals(False)
 
     def on_microscope_changed(self, microscope):
         registry = self.get_registered_microscopes()
@@ -287,45 +445,66 @@ class Mult(QMainWindow):
         self.mainUI.prefix_magnification.blockSignals(False)
         self.compose_prefix()
 
-    def compose_prefix(self):
-        """Assemble the prefix from the structured fields and highlight invalid ones.
-        Expected shape: <TaxonSP000>_<structure><view>_<microscope>_<magnification>,
-        e.g. TetraSP001_opid_leicamz7d5_1d0x"""
-        taxon_ok = self.mainUI.prefix_taxon.hasAcceptableInput()
-        self.mainUI.prefix_taxon.setStyleSheet(
-            "" if taxon_ok or self.mainUI.prefix_taxon.text() == "" else "border: 1px solid red;")
-        structure = self.mainUI.prefix_structure.currentText().strip()
-        view = self.mainUI.prefix_view.currentText().strip()
-        microscope = self.mainUI.prefix_microscope.currentText().strip()
-        magnification = self.mainUI.prefix_magnification.currentText().strip()
-        if taxon_ok and structure != "" and view != "" and microscope != "" and magnification != "":
-            prefix = f"{self.mainUI.prefix_taxon.text()}_{structure}{view}_{microscope}_{magnification}"
-            self.mainUI.prefix_lineEdit.setText(prefix)
-            if self.mainUI.checkbox_show_scalebar.isChecked():
-                self.detect_calibration_from_prefix()
+    def current_voucher(self):
+        """The voucher number composed from the prefix and number fields,
+        zero-padded to 4 digits, e.g. V + 1 -> V0001. Empty if the prefix is invalid."""
+        if not self.mainUI.prefix_voucher_prefix.hasAcceptableInput():
+            return ""
+        prefix = self.mainUI.prefix_voucher_prefix.text().strip()
+        return f"{prefix}{self.mainUI.prefix_voucher_number.value():04d}"
 
-    def on_scalebar_toggled(self, checked):
-        """When the scale bar is turned back on, re-resolve the calibration from
-        the current prefix so a changed prefix takes effect immediately."""
-        if checked:
-            if self.detect_calibration_from_prefix() is None and scale_settings["calibration"] is None:
-                self.mainUI.label_scalebar_status.setText("No scale bar loaded")
+    def compose_prefix(self):
+        """Assemble the image base name from the structured fields and highlight
+        invalid ones. Expected shape (CyberInv lab image name):
+        <sex><type><structure><orientation><preparation>_<voucher>_<magnification>_<instrument>,
+        e.g. fphabd00_V0001_20X_Z10"""
+        voucher = self.current_voucher()
+        self.mainUI.prefix_voucher_prefix.setStyleSheet(
+            "" if voucher != "" or self.mainUI.prefix_voucher_prefix.text() == "" else "border: 1px solid red;")
+        preparation_ok = self.mainUI.prefix_preparation.lineEdit().hasAcceptableInput()
+        self.mainUI.prefix_preparation.lineEdit().setStyleSheet(
+            "" if preparation_ok or self.mainUI.prefix_preparation.currentText() == "" else "border: 1px solid red;")
+        sex = self.mainUI.prefix_sex.currentText()
+        image_type = self.mainUI.prefix_type.currentText()
+        structure = self.mainUI.prefix_structure.currentText().strip()
+        orientation = self.mainUI.prefix_view.currentText().strip()
+        preparation = self.mainUI.prefix_preparation.currentText().strip()
+        microscope = self.mainUI.prefix_microscope.currentText().strip()
+        magnification = normalize_magnification(self.mainUI.prefix_magnification.currentText())
+        self.mainUI.prefix_magnification.lineEdit().setStyleSheet(
+            "" if magnification is not None or self.mainUI.prefix_magnification.currentText() == "" else "border: 1px solid red;")
+        if (voucher != "" and preparation_ok and structure != "" and orientation != ""
+                and microscope != "" and magnification is not None):
+            prefix = f"{sex}{image_type}{structure}{orientation}{preparation}_{voucher}_{magnification}_{microscope}"
+            self.mainUI.prefix_lineEdit.setText(prefix)
+            self.resolve_prefix_calibration()
+        else:
+            self.mainUI.prefix_lineEdit.setText("")
 
     def singleShot(self):
         if os_settings["project_folder"]!= "":
             current_prefix = self.mainUI.prefix_lineEdit.text().strip()
-            os_settings["current_prefix"] = current_prefix
             if current_prefix != "":
+                if self.resolve_prefix_calibration() is None:
+                    QtWidgets.QMessageBox.critical(None,"Calibration required",
+                        "The microscope and magnification in the prefix have no calibration in this project.\nExpand the 'Scale bar / Calibration' panel, register the microscope and calibrate this magnification before capturing.")
+                    return
                 self.mainUI.buttonStatus.setIcon(self.mainUI.icon4)
                 QApplication.processEvents()  # Method 1: Force update
-                prefix_path = jn(os_settings["project_folder"],"images",current_prefix)
+                # Images of one voucher live in one folder named exactly by the
+                # voucher number, per the CyberInv image protocol
+                voucher = self.current_voucher()
+                prefix_path = jn(os_settings["project_folder"],"images",voucher)
                 if not os.path.exists(prefix_path):
                     os.mkdir(prefix_path)
-                self.capture_photo(prefix_path)
+                    # Snapshot the calibration registry so the series stays
+                    # interpretable even if the project is recalibrated later
+                    shutil.copy(self.calibration_file(), jn(prefix_path, CALIBRATION_FILENAME))
+                self.capture_photo(prefix_path, current_prefix)
                 self.mainUI.buttonStatus.setIcon(self.mainUI.icon3)
                 QApplication.processEvents()  # Method 1: Force update
             else:
-                QtWidgets.QMessageBox.critical(None,"Prefix should not be empty", "An empty prefix would create a subfolder without name. Please provide at least one alpha-numberic character as prefix before continuing..")
+                QtWidgets.QMessageBox.critical(None,"Incomplete prefix", "All the prefix fields (voucher, sex, image type, structure, orientation, preparation, microscope and magnification) are required before capturing.\nCheck the highlighted fields and try again.")
         else:
             QtWidgets.QMessageBox.critical(None,"No Project initialized", "A project is required before enabling access to the main images folder and save a single shot.\nPlease create a new project before continuing...")
 
@@ -374,6 +553,13 @@ class Mult(QMainWindow):
         bytes_per_line = ch * w
         return QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
 
+    def refresh_project_state(self):
+        """Reload all calibration-dependent UI after the project folder changes."""
+        scale_settings["calibration"] = None
+        self.mainUI.label_scalebar_status.setText("No calibration active")
+        self.populate_microscope_combos()
+        self.populate_calib_combos()
+
     def open_existing_project(self):
         options = QtWidgets.QFileDialog.Options()
         directory = QtWidgets.QFileDialog.getExistingDirectory(None, "Select Folder", "", options=options)
@@ -381,6 +567,10 @@ class Mult(QMainWindow):
             # os_settings["config"] = jn(directory, "config.json")
             if os.path.exists(jn(directory,"images")):
                 os_settings["project_folder"] = directory
+                if not os.path.exists(jn(directory, CALIBRATION_FILENAME)):
+                    with open(jn(directory, CALIBRATION_FILENAME), "w") as f:
+                        json.dump({"microscopes": {}}, f, indent=2)
+                self.refresh_project_state()
                 QtWidgets.QMessageBox.information(None, "Success!!", f"Project has been successfully loaded at location:\n {directory}")
             else:
                 QtWidgets.QMessageBox.critical(None,"Folder Images Missing...","The directory selected appears to be missing a folder 'images'.\nYou can create a new project or make sure your directory has a folder with that name")
@@ -396,7 +586,10 @@ class Mult(QMainWindow):
                 QtWidgets.QMessageBox.information(None, "There seems to be a folder labelled 'images' in the directory selected.\nPlease erase the folder or use Open instead")
             else:
                 os.mkdir(jn(directory,"images"))
+                with open(jn(directory, CALIBRATION_FILENAME), "w") as f:
+                    json.dump({"microscopes": {}}, f, indent=2)
                 os_settings["project_folder"] = directory
+                self.refresh_project_state()
                 QtWidgets.QMessageBox.information(None, "Success!!", f"A new project project has been created in the directory:\n {directory}")
                     # You can add additional code here to handle the new file creation  
 
@@ -568,5 +761,5 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     window = Mult()
-    window.show()
+    window.showMaximized()  # start occupying the whole screen
     sys.exit(app.exec_())
