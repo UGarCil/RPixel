@@ -20,8 +20,8 @@ class Ui_MainWindow(object):
         self.gridLayout = QtWidgets.QGridLayout(self.centralwidget)
         self.gridLayout.setObjectName("gridLayout")
         self.label = WebcamWidget(self.centralwidget)
-        self.label.setMinimumSize(QtCore.QSize(980, 740))
-        self.label.setMaximumSize(QtCore.QSize(980, 740))
+        self.label.setMinimumSize(QtCore.QSize(0, 0))
+        self.label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.label.setStyleSheet("background-color:rgb(50,50,50);")
         self.label.setAlignment(QtCore.Qt.AlignCenter)
         self.label.setObjectName("label")
@@ -288,8 +288,9 @@ class Ui_MainWindow(object):
 # displayWidget = WebcamWidget(QLabel)
 # interp. a child class optimized for event controlling
 class WebcamWidget(QtWidgets.QLabel):
-    # emitted with (start_pos, end_pos) as QPoints when the user finishes
-    # dragging a reference line in calibration mode
+    # emitted with (start_pos, end_pos) as QPoints in PREVIEW coordinates
+    # (980x740) when the user finishes dragging a reference line in
+    # calibration mode — regardless of how the label is scaled on screen
     line_drawn = QtCore.pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -298,6 +299,19 @@ class WebcamWidget(QtWidgets.QLabel):
         self.calibration_mode = False
         self.line_start = None
         self.line_end = None
+        # rect where the preview image is actually drawn inside the label
+        # (label coordinates); set by update_image_display on every frame
+        self.display_rect = None
+
+    def to_preview_coords(self, pos):
+        """Map a label position to preview pixels (980x740), so calibration
+        lines stay correct no matter how the label is scaled. Before the first
+        frame has set the display rect, the identity mapping is used."""
+        if self.display_rect is None or self.display_rect.width() == 0:
+            return pos
+        x = (pos.x() - self.display_rect.x()) * PREVIEW_WIDTH / self.display_rect.width()
+        y = (pos.y() - self.display_rect.y()) * PREVIEW_HEIGHT / self.display_rect.height()
+        return QtCore.QPoint(round(x), round(y))
 
     def enterEvent(self, event):
         """Hide the cursor when the mouse enters the widget (except while calibrating)."""
@@ -314,16 +328,16 @@ class WebcamWidget(QtWidgets.QLabel):
 
     def mousePressEvent(self, event):
         if self.calibration_mode and event.button() == Qt.LeftButton:
-            self.line_start = event.pos()
-            self.line_end = event.pos()
+            self.line_start = self.to_preview_coords(event.pos())
+            self.line_end = self.to_preview_coords(event.pos())
 
     def mouseMoveEvent(self, event):
         if self.calibration_mode and self.line_start is not None:
-            self.line_end = event.pos()
+            self.line_end = self.to_preview_coords(event.pos())
 
     def mouseReleaseEvent(self, event):
         if self.calibration_mode and event.button() == Qt.LeftButton and self.line_start is not None:
-            self.line_end = event.pos()
+            self.line_end = self.to_preview_coords(event.pos())
             self.line_drawn.emit((self.line_start, self.line_end))
 
 if __name__ == "__main__":

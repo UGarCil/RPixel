@@ -526,7 +526,10 @@ class Mult(QMainWindow):
         self.update_image_display()
 
     def update_image_display(self):
-        """Overlay the mask on top of the image using the mask's values wherever they are non-zero."""
+        """Draw the calibration reference line (in preview coordinates) on the
+        frame, then scale the frame to fit the label keeping the 980x740
+        aspect ratio, recording where the image actually landed so mouse
+        positions can be mapped back to preview pixels."""
         # Create a copy of the original image
         qimage = self.convert_cv_qt()
         # Draw the calibration reference line while the user is dragging it
@@ -536,8 +539,17 @@ class Mult(QMainWindow):
             painter.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0), 2))
             painter.drawLine(label.line_start, label.line_end)
             painter.end()
-        # Set the QPixmap on the QLabel
-        self.mainUI.label.setPixmap(QPixmap.fromImage(qimage))
+        # Fit the frame into the label, preserving the preview aspect ratio
+        # (the captured source stays 980x740; only the display is scaled)
+        rect = label.contentsRect()
+        if rect.width() > 0 and rect.height() > 0:
+            scaled = qimage.scaled(rect.width(), rect.height(),
+                                   QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            label.display_rect = QtCore.QRect(
+                rect.x() + (rect.width() - scaled.width()) // 2,
+                rect.y() + (rect.height() - scaled.height()) // 2,
+                scaled.width(), scaled.height())
+            label.setPixmap(QPixmap.fromImage(scaled))
                 
     def convert_cv_qt(self):
         """Convert from an OpenCV image to QImage, applying the user's flip settings."""
